@@ -80,47 +80,79 @@ def get_teams():
 team_form_cache = {}
 
 
+def _extract_completed_games(events, team_id):
+    """Shared parsing logic for a schedule response — pulls each completed
+    game's scored/allowed for one team."""
+    completed = [e for e in events if e.get('competitions', [{}])[0].get('status', {})
+                 .get('type', {}).get('completed')]
+    completed.sort(key=lambda e: e.get('date', ''))
+    recent = completed[-RECENT_GAMES:]
+    scored, allowed = [], []
+    for e in recent:
+        comp = e['competitions'][0]
+        competitors = comp.get('competitors', [])
+        me = next((c for c in competitors if str(c['team']['id']) == str(team_id)), None)
+        opp = next((c for c in competitors if str(c['team']['id']) != str(team_id)), None)
+        if not me or not opp:
+            continue
+        try:
+            scored.append(float(me['score']['value']))
+            allowed.append(float(opp['score']['value']))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return scored, allowed
+
+
 def get_team_form(team_id):
-    """Last N completed games for a team — points scored and allowed."""
+    """Last N completed games for a team — points scored and allowed.
+
+    Early in a new season (Week 1, before most/all games have kicked off),
+    a team can have ZERO completed games this season — that's not a parse
+    bug, it's genuinely no data yet. In that case, fall back to the tail
+    end of LAST season, so the tool isn't dead for the whole first week or
+    two of the year. A form dict is tagged with which source it actually
+    used ('current' or 'prior_season') so that's visible on the page rather
+    than silently blending two different seasons' games without saying so.
+    """
     if team_id in team_form_cache:
         return team_form_cache[team_id]
+
     r = _get(f"{BASE}/teams/{team_id}/schedule")
-    if r is None:
-        return None
-    try:
-        events = r.json().get('events', [])
-        completed = [e for e in events if e.get('competitions', [{}])[0].get('status', {})
-                     .get('type', {}).get('completed')]
-        completed.sort(key=lambda e: e.get('date', ''))
-        recent = completed[-RECENT_GAMES:]
-        scored, allowed = [], []
-        for e in recent:
-            comp = e['competitions'][0]
-            competitors = comp.get('competitors', [])
-            me = next((c for c in competitors if str(c['team']['id']) == str(team_id)), None)
-            opp = next((c for c in competitors if str(c['team']['id']) != str(team_id)), None)
-            if not me or not opp:
-                continue
+    scored, allowed, source = [], [], 'current'
+    if r is not None:
+        try:
+            events = r.json().get('events', [])
+            scored, allowed = _extract_completed_games(events, team_id)
+        except Exception as e:
+            print(f"  [!] couldn't parse schedule for team {team_id}: {e}")
+
+    if not scored:
+        # Nothing yet this season — try last season's final games instead.
+        current_year = datetime.now().year
+        prior_season = current_year - 1
+        r2 = _get(f"{BASE}/teams/{team_id}/schedule", params={"season": prior_season})
+        if r2 is not None:
             try:
-                scored.append(float(me['score']['value']))
-                allowed.append(float(opp['score']['value']))
-            except (KeyError, TypeError, ValueError):
-                continue
-        if not scored:
-            return None
-        n = len(scored)
-        form = {
-            'avg_scored': round(sum(scored) / n, 1),
-            'avg_allowed': round(sum(allowed) / n, 1),
-            'n_games': n,
-            'scored_list': scored,
-            'allowed_list': allowed,
-        }
-        team_form_cache[team_id] = form
-        return form
-    except Exception as e:
-        print(f"  [!] couldn't parse schedule for team {team_id}: {e}")
+                events2 = r2.json().get('events', [])
+                scored, allowed = _extract_completed_games(events2, team_id)
+                source = 'prior_season'
+            except Exception as e:
+                print(f"  [!] couldn't parse prior-season schedule for team {team_id}: {e}")
+
+    if not scored:
         return None
+
+    n = len(scored)
+    form = {
+        'avg_scored': round(sum(scored) / n, 1),
+        'avg_allowed': round(sum(allowed) / n, 1),
+        'n_games': n,
+        'source': source,
+        'scored_list': scored,
+        'allowed_list': allowed,
+    }
+    team_form_cache[team_id] = form
+    return form
 
 
 def recency_weighted(values):
@@ -341,8 +373,10 @@ def build_predictions():
     all_forms = {}
     for t in teams:
         tid = t['team']['id']
-        print(f"  {t['team']['displayName']}")
-        all_forms[tid] = get_team_form(tid)
+        form = get_team_form(tid)
+        all_forms[tid] = form
+        tag = f" (source: {form['source']})" if form else " (no data)"
+        print(f"  {t['team']['displayName']}{tag}")
 
     lg_scored, lg_allowed = league_averages(all_forms.values())
     print(f"League averages: {lg_scored:.1f} scored/game, {lg_allowed:.1f} allowed/game")
@@ -404,10 +438,10 @@ CARD_TEMPLATE = """<div style="background:#1a1f26;border-radius:12px;padding:16p
     <div><div style="color:#aaa;font-size:11px">{home_team}</div><div style="color:#ffeb3b;font-size:20px;font-weight:bold">{exp_home}</div></div>
   </div>
   <div style="background:#0f1318;border-radius:8px;padding:8px;margin-top:10px;display:flex;justify-content:space-between;font-size:11px">
-    <div>{away_team}: {away_scored} scored/gm • {away_allowed} allowed/gm ({away_n}gm sample)</div>
+    <div>{away_team}: {away_scored} scored/gm • {away_allowed} allowed/gm ({away_n}gm{away_source_tag})</div>
   </div>
   <div style="background:#0f1318;border-radius:8px;padding:8px;margin-top:6px;font-size:11px">
-    {home_team}: {home_scored} scored/gm • {home_allowed} allowed/gm ({home_n}gm sample)
+    {home_team}: {home_scored} scored/gm • {home_allowed} allowed/gm ({home_n}gm{home_source_tag})
   </div>
   {player_props_html}
 </div>"""
@@ -432,8 +466,10 @@ def make_html(predictions):
         exp_away=p['exp_away'], exp_home=p['exp_home'], exp_total=p['exp_total'],
         away_scored=p['away_form']['avg_scored'], away_allowed=p['away_form']['avg_allowed'],
         away_n=p['away_form']['n_games'],
+        away_source_tag=' · last season' if p['away_form'].get('source') == 'prior_season' else '',
         home_scored=p['home_form']['avg_scored'], home_allowed=p['home_form']['avg_allowed'],
         home_n=p['home_form']['n_games'],
+        home_source_tag=' · last season' if p['home_form'].get('source') == 'prior_season' else '',
         player_props_html=(
             player_props_section(p['away_team'], p.get('away_props', []))
             + player_props_section(p['home_team'], p.get('home_props', []))

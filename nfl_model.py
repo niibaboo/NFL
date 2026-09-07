@@ -323,31 +323,34 @@ def _fetch_gamelog_values(athlete_id, stat_key, season):
         season_data = data.get('seasonTypes', [])
         if not season_data and top_keys != ['filters']:
             print(f"    [!] gamelog for athlete {athlete_id}, season {season}: no 'seasonTypes' key. Top-level keys were: {top_keys}")
-        found_any_label_set = False
+
+        # Confirmed via live log: categories have keys
+        # ['displayName', 'type', 'splitType', 'events', 'totals'] — no
+        # per-category labels/names. The labels describing each position in
+        # a game's 'stats' list live at the ROOT of the response instead,
+        # parallel to 'seasonTypes'. Try the plausible root-level key names.
+        root_labels = data.get('labels') or data.get('names') or data.get('displayNames')
+        if season_data and not root_labels:
+            print(f"    [DIAG] athlete {athlete_id}, season {season}: no root-level labels/names/displayNames found. Full top-level keys: {top_keys}")
+
+        found_any_label_set = bool(root_labels)
         printed_sample = False
-        # ESPN gamelog responses are typically keyed by event id with a
-        # parallel 'labels'/'names' array describing which stat each
-        # position in the per-game array corresponds to — exact shape
-        # unconfirmed, so this tries the most likely structure and bails
-        # cleanly if it doesn't match.
         for st in season_data:
             for cat in st.get('categories', []):
                 if not printed_sample:
-                    # Three guesses at the inner shape have all missed —
-                    # print the raw structure directly instead of a fourth
-                    # guess. Truncated to keep the log readable.
                     cat_keys = list(cat.keys())
                     events_sample = cat.get('events', [])[:1]
-                    print(f"    [DIAG] athlete {athlete_id}, season {season}: category top-level keys: {cat_keys}")
+                    totals_sample = cat.get('totals')
+                    print(f"    [DIAG] athlete {athlete_id}, season {season}: category top-level keys: {cat_keys}, root_labels sample: {str(root_labels)[:200]}")
                     print(f"    [DIAG] first event (raw, truncated to 500 chars): {str(events_sample)[:500]}")
+                    print(f"    [DIAG] category 'totals' (raw, truncated to 500 chars): {str(totals_sample)[:500]}")
                     printed_sample = True
+                if not root_labels:
+                    continue
                 for game in cat.get('events', []):
                     stats = game.get('stats', [])
-                    labels = cat.get('labels', []) or cat.get('names', [])
-                    if labels:
-                        found_any_label_set = True
-                    if stat_key in labels:
-                        idx = labels.index(stat_key)
+                    if stat_key in root_labels:
+                        idx = root_labels.index(stat_key)
                         try:
                             values.append(float(stats[idx]))
                         except (IndexError, ValueError, TypeError):

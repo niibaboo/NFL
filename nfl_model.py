@@ -250,11 +250,15 @@ def get_starters(team_id):
     r = _get(f"{BASE}/teams/{team_id}/depthcharts")
     starters = {}
     if r is None:
+        print(f"    [!] depth chart fetch failed for team {team_id} (no response)")
         depth_chart_cache[team_id] = starters
         return starters
     try:
         data = r.json()
+        top_keys = list(data.keys())
         groups = data.get('items') or data.get('athletes') or []
+        if not groups:
+            print(f"    [!] depth chart for team {team_id}: no 'items' or 'athletes' key found. Top-level keys were: {top_keys}")
         for group in groups:
             positions = group.get('positions', {})
             for pos_key, pos_data in positions.items():
@@ -270,6 +274,8 @@ def get_starters(team_id):
                     starters[pos_abbr] = {
                         'id': athlete.get('id'), 'name': athlete.get('displayName', athlete.get('fullName', '?')),
                     }
+        if groups and not starters:
+            print(f"    [!] depth chart for team {team_id}: found {len(groups)} group(s) but matched 0 of QB/RB/WR/TE — position/field names likely don't match what was guessed")
     except Exception as e:
         print(f"  [!] couldn't parse depth chart for team {team_id}: {e}")
     depth_chart_cache[team_id] = starters
@@ -290,27 +296,36 @@ def get_player_gamelog(athlete_id, stat_key):
     url = f"https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{athlete_id}/gamelog"
     r = _get(url)
     values = []
-    if r is not None:
+    if r is None:
+        print(f"    [!] gamelog fetch failed for athlete {athlete_id} (no response)")
+    else:
         try:
             data = r.json()
-            events = data.get('events', {})
+            top_keys = list(data.keys())
+            season_data = data.get('seasonTypes', [])
+            if not season_data:
+                print(f"    [!] gamelog for athlete {athlete_id}: no 'seasonTypes' key. Top-level keys were: {top_keys}")
+            found_any_label_set = False
             # ESPN gamelog responses are typically keyed by event id with a
             # parallel 'labels'/'names' array describing which stat each
             # position in the per-game array corresponds to — exact shape
             # unconfirmed, so this tries the most likely structure and
             # bails cleanly if it doesn't match.
-            season_data = data.get('seasonTypes', [])
             for st in season_data:
                 for cat in st.get('categories', []):
                     for game in cat.get('events', []):
                         stats = game.get('stats', [])
                         labels = cat.get('labels', []) or cat.get('names', [])
+                        if labels:
+                            found_any_label_set = True
                         if stat_key in labels:
                             idx = labels.index(stat_key)
                             try:
                                 values.append(float(stats[idx]))
                             except (IndexError, ValueError, TypeError):
                                 continue
+            if season_data and not values:
+                print(f"    [!] gamelog for athlete {athlete_id}, stat '{stat_key}': parsed categories but found no matching values (found_any_labels={found_any_label_set}) — stat_key likely doesn't match ESPN's actual label name")
         except Exception as e:
             print(f"  [!] couldn't parse gamelog for athlete {athlete_id}: {e}")
 
@@ -336,6 +351,8 @@ def project_player_stat(pos_abbr, athlete_id, name):
 
 def get_team_player_props(team_id):
     starters = get_starters(team_id)
+    if not starters:
+        print(f"    no starters identified for team {team_id} — 0 player props possible for this team")
     props = []
     for pos_abbr, athlete in starters.items():
         if not athlete.get('id'):
@@ -343,6 +360,8 @@ def get_team_player_props(team_id):
         proj = project_player_stat(pos_abbr, athlete['id'], athlete['name'])
         if proj:
             props.append(proj)
+        else:
+            print(f"    {athlete['name']} ({pos_abbr}): no gamelog data found")
     return props
 
 

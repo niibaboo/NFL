@@ -305,41 +305,63 @@ def get_player_gamelog(athlete_id, stat_key):
     if cache_key in player_gamelog_cache:
         return player_gamelog_cache[cache_key]
 
-    url = f"https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{athlete_id}/gamelog"
-    r = _get(url)
+def _fetch_gamelog_values(athlete_id, stat_key, season):
+    """One season's worth of values for a stat — factored out so both the
+    current-season attempt and the prior-season fallback share the same
+    parsing logic."""
+    r = _get(f"https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/{athlete_id}/gamelog",
+             params={"season": season})
     values = []
     if r is None:
-        print(f"    [!] gamelog fetch failed for athlete {athlete_id} (no response)")
-    else:
-        try:
-            data = r.json()
-            top_keys = list(data.keys())
-            season_data = data.get('seasonTypes', [])
-            if not season_data:
-                print(f"    [!] gamelog for athlete {athlete_id}: no 'seasonTypes' key. Top-level keys were: {top_keys}")
-            found_any_label_set = False
-            # ESPN gamelog responses are typically keyed by event id with a
-            # parallel 'labels'/'names' array describing which stat each
-            # position in the per-game array corresponds to — exact shape
-            # unconfirmed, so this tries the most likely structure and
-            # bails cleanly if it doesn't match.
-            for st in season_data:
-                for cat in st.get('categories', []):
-                    for game in cat.get('events', []):
-                        stats = game.get('stats', [])
-                        labels = cat.get('labels', []) or cat.get('names', [])
-                        if labels:
-                            found_any_label_set = True
-                        if stat_key in labels:
-                            idx = labels.index(stat_key)
-                            try:
-                                values.append(float(stats[idx]))
-                            except (IndexError, ValueError, TypeError):
-                                continue
-            if season_data and not values:
-                print(f"    [!] gamelog for athlete {athlete_id}, stat '{stat_key}': parsed categories but found no matching values (found_any_labels={found_any_label_set}) — stat_key likely doesn't match ESPN's actual label name")
-        except Exception as e:
-            print(f"  [!] couldn't parse gamelog for athlete {athlete_id}: {e}")
+        print(f"    [!] gamelog fetch failed for athlete {athlete_id}, season {season} (no response)")
+        return values
+    try:
+        data = r.json()
+        top_keys = list(data.keys())
+        if top_keys == ['filters']:
+            print(f"    [!] gamelog for athlete {athlete_id}, season {season}: still only got 'filters' even with season param. Filters content: {data.get('filters')}")
+        season_data = data.get('seasonTypes', [])
+        if not season_data and top_keys != ['filters']:
+            print(f"    [!] gamelog for athlete {athlete_id}, season {season}: no 'seasonTypes' key. Top-level keys were: {top_keys}")
+        found_any_label_set = False
+        # ESPN gamelog responses are typically keyed by event id with a
+        # parallel 'labels'/'names' array describing which stat each
+        # position in the per-game array corresponds to — exact shape
+        # unconfirmed, so this tries the most likely structure and bails
+        # cleanly if it doesn't match.
+        for st in season_data:
+            for cat in st.get('categories', []):
+                for game in cat.get('events', []):
+                    stats = game.get('stats', [])
+                    labels = cat.get('labels', []) or cat.get('names', [])
+                    if labels:
+                        found_any_label_set = True
+                    if stat_key in labels:
+                        idx = labels.index(stat_key)
+                        try:
+                            values.append(float(stats[idx]))
+                        except (IndexError, ValueError, TypeError):
+                            continue
+        if season_data and not values:
+            print(f"    [!] gamelog for athlete {athlete_id}, season {season}, stat '{stat_key}': parsed categories but found no matching values (found_any_labels={found_any_label_set}) — stat_key likely doesn't match ESPN's actual label name")
+    except Exception as e:
+        print(f"  [!] couldn't parse gamelog for athlete {athlete_id}, season {season}: {e}")
+    return values
+
+
+def get_player_gamelog(athlete_id, stat_key):
+    """Last N games' value for one stat (passing yards, rushing yards,
+    receptions) for a given player. Same Week-1 problem as team form —
+    the current season may have zero games played yet, so this falls back
+    to last season if so."""
+    cache_key = (athlete_id, stat_key)
+    if cache_key in player_gamelog_cache:
+        return player_gamelog_cache[cache_key]
+
+    current_year = datetime.now().year
+    values = _fetch_gamelog_values(athlete_id, stat_key, current_year)
+    if not values:
+        values = _fetch_gamelog_values(athlete_id, stat_key, current_year - 1)
 
     values = values[-RECENT_GAMES:]
     player_gamelog_cache[cache_key] = values

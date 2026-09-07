@@ -231,10 +231,17 @@ def get_week_scoreboard():
 # ---------------------------------------------------------------------------
 
 PLAYER_STAT_CONFIG = {
-    'QB': {'stat': 'passingYards', 'label': 'Passing Yards', 'dist': 'normal', 'std': 55, 'prior': 235},
-    'RB': {'stat': 'rushingYards', 'label': 'Rushing Yards', 'dist': 'normal', 'std': 28, 'prior': 60},
-    'WR': {'stat': 'receptions', 'label': 'Receptions', 'dist': 'poisson', 'std': None, 'prior': 4.0},
-    'TE': {'stat': 'receptions', 'label': 'Receptions', 'dist': 'poisson', 'std': None, 'prior': 3.5},
+    # 'stat' values confirmed against a real ESPN response: root-level
+    # labels are short codes ('YDS', 'REC', etc.), not the descriptive
+    # names originally guessed ('passingYards'). Note 'YDS' can appear
+    # twice in one player's combined stat block (e.g. a QB's passing AND
+    # rushing yards both labeled 'YDS') — .index() takes the FIRST match,
+    # which is correct for QB (passing comes first) but would be WRONG if
+    # a position's category ever led with a different 'YDS' stat first.
+    'QB': {'stat': 'YDS', 'label': 'Passing Yards', 'dist': 'normal', 'std': 55, 'prior': 235},
+    'RB': {'stat': 'YDS', 'label': 'Rushing Yards', 'dist': 'normal', 'std': 28, 'prior': 60},
+    'WR': {'stat': 'REC', 'label': 'Receptions', 'dist': 'poisson', 'std': None, 'prior': 4.0},
+    'TE': {'stat': 'REC', 'label': 'Receptions', 'dist': 'poisson', 'std': None, 'prior': 3.5},
 }
 
 depth_chart_cache = {}

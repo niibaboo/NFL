@@ -256,9 +256,18 @@ def get_starters(team_id):
     try:
         data = r.json()
         top_keys = list(data.keys())
-        groups = data.get('items') or data.get('athletes') or []
+        depthchart_raw = data.get('depthchart')  # confirmed via live log: this is the real key
+        if isinstance(depthchart_raw, list):
+            groups = depthchart_raw
+        elif isinstance(depthchart_raw, dict):
+            # Might be one more level nested (e.g. {"items": [...]}) — try common wrapper keys.
+            groups = depthchart_raw.get('items') or depthchart_raw.get('athletes') or []
+            if not groups:
+                print(f"    [!] depth chart for team {team_id}: 'depthchart' is a dict with keys {list(depthchart_raw.keys())} — none matched expected wrapper keys")
+        else:
+            groups = []
         if not groups:
-            print(f"    [!] depth chart for team {team_id}: no 'items' or 'athletes' key found. Top-level keys were: {top_keys}")
+            print(f"    [!] depth chart for team {team_id}: 'depthchart' key present but empty/unrecognized shape (type={type(depthchart_raw).__name__}). Top-level keys were: {top_keys}")
         for group in groups:
             positions = group.get('positions', {})
             for pos_key, pos_data in positions.items():
@@ -275,7 +284,10 @@ def get_starters(team_id):
                         'id': athlete.get('id'), 'name': athlete.get('displayName', athlete.get('fullName', '?')),
                     }
         if groups and not starters:
-            print(f"    [!] depth chart for team {team_id}: found {len(groups)} group(s) but matched 0 of QB/RB/WR/TE — position/field names likely don't match what was guessed")
+            sample = groups[0]
+            print(f"    [!] depth chart for team {team_id}: found {len(groups)} group(s) but matched 0 of QB/RB/WR/TE. "
+                  f"First group's keys: {list(sample.keys()) if isinstance(sample, dict) else type(sample).__name__}, "
+                  f"positions sub-keys (if any): {list(sample.get('positions', {}).keys()) if isinstance(sample, dict) else 'n/a'}")
     except Exception as e:
         print(f"  [!] couldn't parse depth chart for team {team_id}: {e}")
     depth_chart_cache[team_id] = starters

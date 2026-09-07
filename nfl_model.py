@@ -324,6 +324,7 @@ def _fetch_gamelog_values(athlete_id, stat_key, season):
         if not season_data and top_keys != ['filters']:
             print(f"    [!] gamelog for athlete {athlete_id}, season {season}: no 'seasonTypes' key. Top-level keys were: {top_keys}")
         found_any_label_set = False
+        printed_sample = False
         # ESPN gamelog responses are typically keyed by event id with a
         # parallel 'labels'/'names' array describing which stat each
         # position in the per-game array corresponds to — exact shape
@@ -331,6 +332,15 @@ def _fetch_gamelog_values(athlete_id, stat_key, season):
         # cleanly if it doesn't match.
         for st in season_data:
             for cat in st.get('categories', []):
+                if not printed_sample:
+                    # Three guesses at the inner shape have all missed —
+                    # print the raw structure directly instead of a fourth
+                    # guess. Truncated to keep the log readable.
+                    cat_keys = list(cat.keys())
+                    events_sample = cat.get('events', [])[:1]
+                    print(f"    [DIAG] athlete {athlete_id}, season {season}: category top-level keys: {cat_keys}")
+                    print(f"    [DIAG] first event (raw, truncated to 500 chars): {str(events_sample)[:500]}")
+                    printed_sample = True
                 for game in cat.get('events', []):
                     stats = game.get('stats', [])
                     labels = cat.get('labels', []) or cat.get('names', [])

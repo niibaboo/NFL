@@ -1153,19 +1153,19 @@
         ]
       },
       {
-        "name": "Pat Freiermuth",
+        "name": "Darnell Washington",
         "position": "TE",
         "label": "Receptions",
         "dist": "poisson",
         "std": null,
-        "projected": 2.5,
+        "projected": 1.8,
         "n_games": 5,
         "recent_values": [
-          1.0,
-          0.0,
-          1.0,
           3.0,
-          3.0
+          3.0,
+          0.0,
+          0.0,
+          0.0
         ]
       },
       {
@@ -1203,19 +1203,19 @@
         ]
       },
       {
-        "name": "Tua Tagovailoa",
+        "name": "Michael Penix Jr.",
         "position": "QB",
         "label": "Passing Yards",
         "dist": "normal",
         "std": 55,
-        "projected": 209.1,
+        "projected": 232.9,
         "n_games": 5,
         "recent_values": [
-          256.0,
-          177.0,
-          146.0,
-          315.0,
-          114.0
+          250.0,
+          313.0,
+          172.0,
+          135.0,
+          298.0
         ]
       },
       {

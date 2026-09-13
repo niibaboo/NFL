@@ -304,14 +304,6 @@ def get_starters(team_id):
 player_gamelog_cache = {}
 
 
-def get_player_gamelog(athlete_id, stat_key):
-    """Last N games' value for one stat (passing yards, rushing yards,
-    receptions) for a given player. Tries the common v3 gamelog endpoint
-    first since it's documented as NFL-supported."""
-    cache_key = (athlete_id, stat_key)
-    if cache_key in player_gamelog_cache:
-        return player_gamelog_cache[cache_key]
-
 def _fetch_gamelog_values(athlete_id, stat_key, season):
     """One season's worth of values for a stat — factored out so both the
     current-season attempt and the prior-season fallback share the same
@@ -373,7 +365,14 @@ def get_player_gamelog(athlete_id, stat_key):
     """Last N games' value for one stat (passing yards, rushing yards,
     receptions) for a given player. Same Week-1 problem as team form —
     the current season may have zero games played yet, so this falls back
-    to last season if so."""
+    to last season if so.
+
+    NOTE: the chronological order of the returned list is NOT verified —
+    ESPN's gamelog 'events' array order isn't documented, so unlike
+    team form's scored_list/allowed_list (confirmed oldest→newest by this
+    script's own sort), player recent_values may or may not be in date
+    order. Treat any "trend" read from this list with more caution than
+    the team-level lists."""
     cache_key = (athlete_id, stat_key)
     if cache_key in player_gamelog_cache:
         return player_gamelog_cache[cache_key]
@@ -433,6 +432,258 @@ def poisson_pmf(k, lam):
 
 def poisson_cdf(k, lam):
     return sum(poisson_pmf(i, lam) for i in range(int(k) + 1))
+
+
+# ---------------------------------------------------------------------------
+# Safest Bet Builder — same pattern as Match IQ (soccer): every market the
+# model can price gets a "safe" line set below the projection, turned into
+# an actual probability, and the HTML gets a builder panel that rotates
+# through market categories and shuffles among near-tied legs so it draws
+# from more of the week's games instead of fixating on the same few.
+# ---------------------------------------------------------------------------
+
+def normal_prop(mean, std, factor=0.72, round_to=0.5):
+    """Safety-margin line for a normally-distributed stat (team points,
+    QB passing yards, RB rushing yards) — same 72%-of-projection idea as
+    Match IQ's shots/SoT lines, adapted from Poisson to Normal math."""
+    if mean is None or std is None:
+        return None
+    raw_line = mean * factor
+    line = math.floor(raw_line / round_to) * round_to
+    if line < round_to:
+        line = round_to
+    prob_over = 1 - norm_cdf(line, mean, std)
+    return {"line": line, "prob": round(prob_over * 100), "avg": mean}
+
+
+def poisson_prop(mean, factor=0.72):
+    """Safety-margin line for a Poisson-distributed stat (WR/TE
+    receptions) — identical math to Match IQ's shots/corners props."""
+    if mean is None:
+        return None
+    raw_line = mean * factor
+    line = math.floor(raw_line * 2) / 2
+    if line < 0.5:
+        line = 0.5
+    threshold = int(math.floor(line)) + 1
+    prob = 1 - poisson_cdf(threshold - 1, mean)
+    return {"line": line, "prob": round(prob * 100), "avg": mean}
+
+
+def format_history(lst):
+    """Render a stat's recent-games list as a slash-separated string for
+    display. Team scored_list/allowed_list are confirmed oldest→newest by
+    get_team_form's own sort, so shown as-is (left-to-right = chronological).
+    Player recent_values order is UNVERIFIED (see get_player_gamelog's
+    docstring) — shown as returned, not re-ordered, since re-ordering
+    something of unknown order would be a guess dressed up as a fact."""
+    if not lst:
+        return None
+    return "/".join(str(v) for v in lst)
+
+
+def build_legs(predictions):
+    """Flatten every game's probability-priced markets into one list of
+    individual bet-builder legs. Covers: each team's total points, the
+    combined game total, and every player prop the model has data for.
+    Tagged with a "category" so the builder can rotate market types."""
+    legs = []
+    for p in predictions:
+        match_label = p["match"]
+        hf, af = p["home_form"], p["away_form"]
+
+        home_total = normal_prop(p["exp_home"], DEFAULT_TEAM_STD)
+        if home_total:
+            legs.append({
+                "match": match_label,
+                "market": f"{p['home_team']} Over {home_total['line']} Points",
+                "prob": home_total["prob"], "category": "Team Total",
+                "detail": f"proj {home_total['avg']} pts ({hf['n_games']}gm{' · last season' if hf.get('source') == 'prior_season' else ''})",
+                "history": format_history(hf.get("scored_list")),
+            })
+        away_total = normal_prop(p["exp_away"], DEFAULT_TEAM_STD)
+        if away_total:
+            legs.append({
+                "match": match_label,
+                "market": f"{p['away_team']} Over {away_total['line']} Points",
+                "prob": away_total["prob"], "category": "Team Total",
+                "detail": f"proj {away_total['avg']} pts ({af['n_games']}gm{' · last season' if af.get('source') == 'prior_season' else ''})",
+                "history": format_history(af.get("scored_list")),
+            })
+
+        game_total = normal_prop(p["exp_total"], p["total_std"])
+        if game_total:
+            legs.append({
+                "match": match_label,
+                "market": f"Game Over {game_total['line']} Total Points",
+                "prob": game_total["prob"], "category": "Game Total",
+                "detail": f"proj {game_total['avg']} pts ({hf['n_games']}v{af['n_games']}gm)",
+                "history": None,
+            })
+
+        for team_name, props in [(p["home_team"], p.get("home_props") or []),
+                                   (p["away_team"], p.get("away_props") or [])]:
+            for prop in props:
+                if prop["dist"] == "poisson":
+                    result = poisson_prop(prop["projected"])
+                else:
+                    result = normal_prop(prop["projected"], prop["std"])
+                if not result:
+                    continue
+                legs.append({
+                    "match": match_label,
+                    "market": f"{prop['name']} Over {result['line']} {prop['label']}",
+                    "prob": result["prob"], "category": prop["label"],
+                    "detail": f"proj {result['avg']} ({prop['n_games']}gm)",
+                    "history": format_history(prop.get("recent_values")),
+                })
+    return legs
+
+
+BUILDER_TEMPLATE = """
+<div style="background:#1a1f26;border-radius:12px;padding:16px;margin:12px 0;border:1px solid #2a3038">
+  <div style="font-size:14px;font-weight:bold;margin-bottom:10px">🎯 Safest Bet Builder</div>
+  <div id="categoryToggles" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:12px"></div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+    <label style="font-size:12px;color:#aaa">Target odds:</label>
+    <input id="targetOdds" type="number" step="0.1" min="1.1" value="5.0"
+      style="width:70px;background:#0f1318;border:1px solid #333;color:white;border-radius:6px;padding:6px 8px;font-size:13px">
+    <label style="font-size:12px;color:#aaa">Max legs:</label>
+    <input id="maxLegs" type="number" step="1" min="2" value="8"
+      style="width:55px;background:#0f1318;border:1px solid #333;color:white;border-radius:6px;padding:6px 8px;font-size:13px">
+    <button onclick="buildSafest()"
+      style="background:#3a7d7a;border:none;color:white;padding:7px 14px;border-radius:6px;font-size:13px;cursor:pointer">
+      Build
+    </button>
+    <button onclick="buildSafest()"
+      style="background:#2a3038;border:1px solid #444;color:white;padding:7px 14px;border-radius:6px;font-size:13px;cursor:pointer">
+      🔀 Shuffle
+    </button>
+  </div>
+  <div id="builderResult" style="font-size:12px;color:#888">
+    Untick any market type you don't want considered, set a target odds and
+    leg cap, then tap Build. It rotates through whichever categories are
+    ticked, groups near-tied legs and shuffles within each group so it draws
+    from more of the week's games rather than always the exact same few, and
+    caps at 2 legs per game to avoid stacking correlated legs from one
+    matchup. Tap Shuffle for a fresh pick among equally-safe options without
+    changing your settings.
+  </div>
+</div>
+<script>
+const LEGS = {legs_json};
+
+function initCategoryToggles() {{
+  const container = document.getElementById('categoryToggles');
+  const cats = [...new Set(LEGS.map(l => l.category))];
+  container.innerHTML = cats.map(c => `
+    <label style="display:flex;align-items:center;gap:4px;color:#ccc;cursor:pointer">
+      <input type="checkbox" class="catToggle" value="${{c}}" checked>
+      ${{c}}
+    </label>
+  `).join('');
+}}
+initCategoryToggles();
+
+function shuffle(arr) {{
+  for (let i = arr.length - 1; i > 0; i--) {{
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }}
+  return arr;
+}}
+
+// Sorts safest-first at a coarse level (5-point probability bands) but
+// shuffles legs WITHIN each band, so several legs sitting at similar
+// probabilities get picked in a different order each time instead of
+// always the same one — lets the builder draw from the full pool of
+// games instead of fixating on whichever leg is a fraction ahead.
+function tieredShuffle(legs, bandSize) {{
+  const bands = {{}};
+  legs.forEach(l => {{
+    const band = Math.floor(l.prob / bandSize);
+    (bands[band] = bands[band] || []).push(l);
+  }});
+  const bandKeys = Object.keys(bands).map(Number).sort((a, b) => b - a);
+  let result = [];
+  bandKeys.forEach(b => {{ result = result.concat(shuffle(bands[b])); }});
+  return result;
+}}
+
+function buildSafest() {{
+  const target = parseFloat(document.getElementById('targetOdds').value) || 5.0;
+  const maxLegs = parseInt(document.getElementById('maxLegs').value) || 8;
+  const activeCats = [...document.querySelectorAll('.catToggle:checked')].map(el => el.value);
+
+  const byCategory = {{}};
+  LEGS.filter(l => l.prob > 0 && activeCats.includes(l.category)).forEach(l => {{
+    (byCategory[l.category] = byCategory[l.category] || []).push(l);
+  }});
+  const categories = Object.keys(byCategory);
+  categories.forEach(c => {{ byCategory[c] = tieredShuffle(byCategory[c], 5); }});
+  const cursor = {{}};
+  categories.forEach(c => cursor[c] = 0);
+
+  const chosen = [];
+  const matchCount = {{}};
+  let combinedOdds = 1;
+  let addedThisPass = true;
+
+  while (addedThisPass && combinedOdds < target && chosen.length < maxLegs) {{
+    addedThisPass = false;
+    for (const cat of categories) {{
+      if (combinedOdds >= target || chosen.length >= maxLegs) break;
+      const arr = byCategory[cat];
+      while (cursor[cat] < arr.length) {{
+        const leg = arr[cursor[cat]];
+        cursor[cat]++;
+        const count = matchCount[leg.match] || 0;
+        if (count >= 2) continue;  // cap legs per game to limit correlation risk
+        chosen.push(leg);
+        combinedOdds *= 100 / leg.prob;
+        matchCount[leg.match] = count + 1;
+        addedThisPass = true;
+        break;
+      }}
+    }}
+  }}
+
+  const el = document.getElementById('builderResult');
+  if (!chosen.length) {{
+    el.innerHTML = 'No legs available to build from.';
+    return;
+  }}
+
+  const rows = chosen.map(l =>
+    `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #2a3038">
+       <span>${{l.match}}<br><span style="color:#7ec8ff">${{l.market}}</span> <span style="color:#555">· ${{l.category}}</span>
+       ${{l.detail ? `<br><span style="color:#666;font-size:10px">${{l.detail}}</span>` : ''}}
+       ${{l.history ? `<br><span style="color:#555;font-size:10px">last games: ${{l.history}}</span>` : ''}}</span>
+       <span style="color:#ffeb3b;font-weight:bold">${{l.prob}}%</span>
+     </div>`
+  ).join('');
+
+  const capNote = chosen.length >= maxLegs && combinedOdds < target
+    ? ' (hit the leg cap before reaching target — raise Max legs or lower Target odds)'
+    : (combinedOdds < target ? ' (ran out of legs before reaching target)' : '');
+
+  el.innerHTML = `
+    <div style="color:white;font-size:13px;margin-bottom:6px">
+      ${{chosen.length}} legs · est. combined odds ~<b>${{combinedOdds.toFixed(2)}}</b>${{capNote}}
+    </div>
+    ${{rows}}
+    <div style="color:#666;font-size:10px;margin-top:8px;line-height:1.4">
+      Estimate multiplies each leg's fair odds (100/probability) — real
+      sportsbook odds include their margin and legs within the same game
+      aren't fully independent, so treat this as a ranking tool, not a firm
+      price. Team/game totals use a Normal-distribution projection; WR/TE
+      receptions use Poisson. All lines are set automatically below the
+      model's projection for a safety margin.
+    </div>
+  `;
+}}
+</script>
+"""
 
 
 def build_predictions():
@@ -498,6 +749,7 @@ HTML_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <h2 style="text-align:center">🏈 BLITZ IQ — NFL Team Points</h2>
 <p style="text-align:center;color:#888;font-size:11px">Recency-weighted scoring/allowed rates, Normal-distribution projected · {generated}</p>
 <p style="text-align:center;margin-bottom:16px"><a href="blitz_iq_predictions.csv" download style="background:#222;border:1px solid #444;color:white;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:13px">⬇ Download CSV</a></p>
+{builder}
 {cards}
 <p style="text-align:center;color:#666;font-size:10px;margin-top:20px">Enter your book's Over/Under line and odds to compute an edge the same way as the MLB/soccer tools — this page shows the model's own projection only.</p>
 </body></html>"""
@@ -550,7 +802,13 @@ def make_html(predictions):
     ) for p in predictions)
     if not cards:
         cards = '<p style="text-align:center;color:#888">No upcoming games with usable form data this week.</p>'
-    return HTML_TEMPLATE.format(generated=datetime.now().strftime('%d %b %H:%M'), cards=cards)
+
+    legs = build_legs(predictions)
+    builder = BUILDER_TEMPLATE.format(legs_json=json.dumps(legs)) if legs else ""
+
+    return HTML_TEMPLATE.format(
+        generated=datetime.now().strftime('%d %b %H:%M'), builder=builder, cards=cards,
+    )
 
 
 def write_csv(predictions, path):
